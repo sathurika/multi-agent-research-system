@@ -8,8 +8,16 @@ from models.schemas import AgentState
 
 def should_continue_after_verification(state: AgentState):
     """
-    Decide whether the workflow should retry research
-    or continue to the Writer Agent.
+    Decide what should happen after the Verifier Agent.
+
+    PASS:
+        Send the verified research to the Writer Agent.
+
+    FAIL + retries available:
+        Send the workflow back to the Research Agent.
+
+    FAIL + maximum retries reached:
+        Stop the workflow without generating a normal report.
     """
 
     if state.verification_verdict == "PASS":
@@ -18,7 +26,7 @@ def should_continue_after_verification(state: AgentState):
     if state.research_attempts < 2:
         return "research"
 
-    return "writer"
+    return "end"
 
 
 def build_graph():
@@ -33,7 +41,11 @@ def build_graph():
     graph.add_node("writer", write_report)
 
     graph.add_edge(START, "research")
-    graph.add_edge("research", "verifier")
+
+    graph.add_edge(
+        "research",
+        "verifier",
+    )
 
     graph.add_conditional_edges(
         "verifier",
@@ -41,9 +53,13 @@ def build_graph():
         {
             "research": "research",
             "writer": "writer",
+            "end": END,
         },
     )
 
-    graph.add_edge("writer", END)
+    graph.add_edge(
+        "writer",
+        END,
+    )
 
     return graph.compile()

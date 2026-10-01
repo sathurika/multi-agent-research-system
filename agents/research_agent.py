@@ -40,9 +40,39 @@ def research(state: AgentState) -> AgentState:
     state.status = "researching"
     state.step_count += 1
     state.research_attempts += 1
+    state.research_findings = []
 
     attempt_number = state.research_attempts
+    previous_feedback = ""
 
+    if attempt_number > 1:
+        previous_feedback = f"""
+PREVIOUS VERIFICATION FEEDBACK:
+
+The previous research attempt failed verification.
+
+Failed finding numbers:
+{state.failed_findings}
+
+Verifier feedback:
+{state.verification_reason}
+
+IMPORTANT:
+You are now performing a corrective research attempt.
+
+You MUST specifically improve the failed findings.
+
+For each failed finding:
+
+- Do NOT repeat the previous claim automatically.
+- Re-check the exact source content.
+- Identify the unsupported portion of the claim.
+- Either find source content that explicitly supports that detail,
+  OR remove/narrow that detail from the claim.
+- The revised claim must not be stronger than its evidence.
+- Do not preserve unsupported percentages, numbers, causal claims,
+  guarantees, or capabilities.
+"""
     state.execution_history.append(
         AgentEvent(
             agent="Research Agent",
@@ -129,6 +159,8 @@ You are a professional research analyst.
 USER RESEARCH QUESTION:
 {state.user_query}
 
+{previous_feedback}
+
 You have been given several web sources below.
 
 Your task is to produce exactly 5 research findings.
@@ -160,6 +192,52 @@ IMPORTANT RULES:
 
 10. If a source does not contain enough information to support
     a claim, choose another source.
+
+    11. Never include a number, percentage, date, quantity, or other
+    specific detail in a claim unless that exact detail appears
+    in the supporting source content.
+
+12. The claim must be no stronger than the evidence.
+    Do not infer, exaggerate, or generalize beyond what the source says.
+
+13. Evidence must directly contain or clearly establish the claim.
+    If the source only supports a weaker statement, rewrite the claim
+    to match the weaker statement.
+
+14. On corrective research attempts, pay special attention to the
+    findings identified by the verifier as failed.
+
+15. Prefer a narrower claim with strong evidence over a broader claim
+    with weak evidence.
+
+    16. Before returning each finding, perform a claim-evidence check.
+
+    Ask yourself:
+    "If a strict verifier saw ONLY this evidence, would they be able
+    to prove this exact claim?"
+
+    If the answer is NO, rewrite the claim.
+
+17. Do not add information from your general knowledge.
+
+18. Do not assume that a source's title, URL, or topic proves a claim.
+    The supporting information must appear in the provided CONTENT.
+
+19. Avoid unsupported causal language such as:
+    "prevents", "guarantees", "ensures", "significantly improves",
+    "eliminates", or "causes" unless the source explicitly supports
+    that wording.
+
+20. Avoid exact percentages or numerical measurements unless they
+    appear explicitly in the source CONTENT.
+
+21. The safest acceptable relationship is:
+
+    CLAIM = what the evidence explicitly establishes.
+
+    Never:
+
+    CLAIM > EVIDENCE.
 
 Return exactly 5 findings.
 

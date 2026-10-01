@@ -17,6 +17,14 @@ def get_llm() -> ChatOpenAI:
 
 
 def verify_research(state: AgentState) -> AgentState:
+    """
+    Verify the research findings against their evidence.
+
+    The verifier returns:
+        PASS -> continue to Writer Agent
+        FAIL -> return to Research Agent for another attempt
+    """
+
     state.status = "verifying"
     state.step_count += 1
 
@@ -28,9 +36,16 @@ def verify_research(state: AgentState) -> AgentState:
         )
     )
 
+    # ---------------------------------------------------------
+    # 1. Make sure research findings exist
+    # ---------------------------------------------------------
+
     if not state.research_findings:
         state.error = "No research findings available for verification."
         state.status = "failed"
+        state.verification_verdict = "FAIL"
+        state.verification_reason = state.error
+        state.failed_findings = []
 
         state.execution_history.append(
             AgentEvent(
@@ -42,12 +57,18 @@ def verify_research(state: AgentState) -> AgentState:
 
         return state
 
+    # ---------------------------------------------------------
+    # 2. Prepare findings for the LLM
+    # ---------------------------------------------------------
+
     findings_text = "\n\n".join(
         [
-            f"Finding {index}:\n"
-            f"Claim: {finding.claim}\n"
-            f"Evidence: {finding.evidence}\n"
-            f"Source: {finding.source_url}"
+            (
+                f"Finding {index}:\n"
+                f"Claim: {finding.claim}\n"
+                f"Evidence: {finding.evidence}\n"
+                f"Source: {finding.source_url}"
+            )
             for index, finding in enumerate(
                 state.research_findings,
                 start=1,
@@ -55,30 +76,37 @@ def verify_research(state: AgentState) -> AgentState:
         ]
     )
 
+    # ---------------------------------------------------------
+    # 3. Create verifier LLM
+    # ---------------------------------------------------------
+
     llm = get_llm()
 
     prompt = f"""
 You are a strict research verification agent.
 
-Original research question:
+Your job is to verify research findings before they are sent
+to a report-writing agent.
 
+Original research question:
 {state.user_query}
 
 Research findings:
-
 {findings_text}
 
-Evaluate every finding.
+For EVERY finding, check:
 
-For each finding, check:
-
-1. Does the evidence support the claim?
+1. Does the evidence actually support the claim?
 2. Is a source URL provided?
-3. Is the finding relevant to the question?
-4. Does it contain unsupported information?
-5. Are there contradictions?
+3. Is the finding relevant to the research question?
+4. Does the claim contain information that is not supported
+   by the evidence?
+5. Does the finding contradict another finding?
 
-Return ONLY this format:
+A finding should be considered FAILED if an important part
+of its claim is unsupported by its evidence.
+
+Return ONLY the following format:
 
 VERDICT: PASS
 REASON: <short explanation>
@@ -90,19 +118,34 @@ VERDICT: FAIL
 REASON: <short explanation>
 FAILED_FINDINGS: 1, 3
 
-Use FAIL when important findings are unsupported.
+Rules:
+
+- Use PASS only when all important findings are adequately
+  supported.
+- Use FAIL if one or more important findings are unsupported.
+- FAILED_FINDINGS must contain ONLY the numbers of findings
+  that failed.
+- Do not include any extra text outside this format.
 """
+
+    # ---------------------------------------------------------
+    # 4. Ask the LLM to verify
+    # ---------------------------------------------------------
 
     try:
         response = llm.invoke(prompt)
 
         verification_text = response.content.strip()
 
-        state.final_answer = verification_text
+        # Store the verifier response separately.
+        state.verification_reason = verification_text
+
+        # -----------------------------------------------------
+        # 5. Parse VERDICT
+        # -----------------------------------------------------
 
         if "VERDICT: PASS" in verification_text:
             state.verification_verdict = "PASS"
-            state.verification_reason = verification_text
             state.failed_findings = []
             state.status = "verified"
 
@@ -114,19 +157,42 @@ Use FAIL when important findings are unsupported.
                 )
             )
 
-        else:
+            return state
+
+        # -----------------------------------------------------
+        # 6. Handle FAIL
+        # -----------------------------------------------------
+
+        if "VERDICT: FAIL" in verification_text:
             state.verification_verdict = "FAIL"
             state.status = "verification_failed"
 
-            failed_numbers = []
+            failed_findings = []
 
-            for number in range(1, len(state.research_findings) + 1):
-                if str(number) in verification_text:
-                    failed_numbers.append(number)
+            # Look specifically at the FAILED_FINDINGS line.
+            for line in verification_text.splitlines():
+                line = line.strip()
 
-            state.failed_findings = failed_numbers
+                if line.startswith("FAILED_FINDINGS:"):
+                    failed_part = line.split(
+                        "FAILED_FINDINGS:",
+                        1,
+                    )[1].strip()
 
-            state.verification_reason = verification_text
+                    if failed_part.upper() != "NONE":
+                        for item in failed_part.split(","):
+                            item = item.strip()
+
+                            if item.isdigit():
+                                number = int(item)
+
+                                if (
+                                    1 <= number
+                                    <= len(state.research_findings)
+                                ):
+                                    failed_findings.append(number)
+
+            state.failed_findings = failed_findings
 
             state.execution_history.append(
                 AgentEvent(
@@ -134,16 +200,43 @@ Use FAIL when important findings are unsupported.
                     status="failed",
                     message=(
                         "Research failed verification. "
-                        f"Failed findings: {failed_numbers}"
+                        f"Failed findings: {failed_findings}"
                     ),
                 )
             )
 
+            return state
+
+        # -----------------------------------------------------
+        # 7. Unexpected verifier response
+        # -----------------------------------------------------
+
+        state.verification_verdict = "FAIL"
+        state.status = "verification_failed"
+        state.failed_findings = []
+
+        state.execution_history.append(
+            AgentEvent(
+                agent="Verifier Agent",
+                status="failed",
+                message=(
+                    "Verifier returned an unexpected response "
+                    "format."
+                ),
+            )
+        )
+
         return state
+
+    # ---------------------------------------------------------
+    # 8. LLM/API error
+    # ---------------------------------------------------------
 
     except Exception as exc:
         state.error = str(exc)
         state.status = "failed"
+        state.verification_verdict = "FAIL"
+        state.verification_reason = str(exc)
 
         state.execution_history.append(
             AgentEvent(
@@ -169,6 +262,15 @@ if __name__ == "__main__":
     if result.error:
         print("\nERROR:")
         print(result.error)
+
+    print("\n=== VERIFICATION VERDICT ===")
+    print(result.verification_verdict)
+
+    print("\n=== VERIFICATION REASON ===")
+    print(result.verification_reason)
+
+    print("\n=== FAILED FINDINGS ===")
+    print(result.failed_findings)
 
     print("\n=== EXECUTION HISTORY ===")
 
