@@ -1,115 +1,284 @@
 ﻿from langchain_openai import ChatOpenAI
 
 from config.settings import get_settings
-from models.schemas import AgentState, ResearchAnalysis, ResearchFinding, Source
+from models.schemas import (
+    AgentEvent,
+    AgentState,
+    ResearchAnalysis,
+    ResearchFinding,
+    Source,
+)
 from tools.search_tool import search_web
 
 
 def get_llm() -> ChatOpenAI:
+    """Create the LLM client using the configured OpenRouter settings."""
+
     settings = get_settings()
 
     return ChatOpenAI(
+        
         model=settings.model_name,
         api_key=settings.openrouter_api_key,
         base_url="https://openrouter.ai/api/v1",
         temperature=0,
-        timeout=settings.request_timeout,
     )
 
 
 def research(state: AgentState) -> AgentState:
+    """
+    Research the user's question.
+
+    The agent:
+    1. Searches the web.
+    2. Sends the search results to the LLM.
+    3. Extracts individual claims.
+    4. Requires each finding to contain its own evidence.
+    5. Associates every finding with a source.
+    """
+
     state.status = "researching"
     state.step_count += 1
+    state.research_attempts += 1
 
-    results = search_web(
-        query=state.user_query,
-        max_results=5,
+    attempt_number = state.research_attempts
+
+    state.execution_history.append(
+        AgentEvent(
+            agent="Research Agent",
+            status="started",
+            message=f"Research attempt #{attempt_number}",
+        )
     )
 
-    if not results:
-        state.error = "No search results were found."
+    # ---------------------------------------------------------
+    # 1. Search the web
+    # ---------------------------------------------------------
+
+    search_results = search_web(state.user_query)
+
+    if not search_results:
         state.status = "failed"
+
+        state.execution_history.append(
+            AgentEvent(
+                agent="Research Agent",
+                status="failed",
+                message="No web search results were returned.",
+            )
+        )
+
         return state
 
-    research_context = "\n\n".join(
-        [
-            f"TITLE: {result['title']}\n"
-            f"URL: {result['url']}\n"
-            f"CONTENT: {result['content']}"
-            for result in results
-        ]
-    )
+    # ---------------------------------------------------------
+    # 2. Convert search results into Source objects
+    # ---------------------------------------------------------
+
+    sources = []
+
+    for result in search_results:
+        title = result.get("title", "Untitled source")
+        url = result.get("url", "")
+        content = result.get("content", "")
+
+        sources.append(
+            Source(
+                title=title,
+                url=url,
+                content=content,
+            )
+        )
+
+    state.sources = sources
+
+    # ---------------------------------------------------------
+    # 3. Prepare source material for the LLM
+    # ---------------------------------------------------------
+
+    source_text = ""
+
+    for index, source in enumerate(sources, start=1):
+        source_text += f"""
+SOURCE {index}
+
+TITLE:
+{source.title}
+
+URL:
+{source.url}
+
+CONTENT:
+{source.content}
+
+--------------------------------------------------
+"""
+
+    # ---------------------------------------------------------
+    # 4. Ask the LLM for structured findings
+    # ---------------------------------------------------------
 
     llm = get_llm()
 
-    structured_llm = llm.with_structured_output(ResearchAnalysis)
+    structured_llm = llm.with_structured_output(
+        ResearchAnalysis
+    )
 
     prompt = f"""
-You are a research analyst.
+You are a professional research analyst.
 
-The user wants information about:
-
+USER RESEARCH QUESTION:
 {state.user_query}
 
-Below are web search results.
+You have been given several web sources below.
 
-Analyze the sources carefully.
+Your task is to produce exactly 5 research findings.
 
-Create individual research findings.
+IMPORTANT RULES:
 
-For every finding:
+1. Every finding must contain ONE specific claim.
 
-1. Write one clear factual claim.
-2. Provide evidence from the search results.
-3. Provide the URL of the source supporting that claim.
-4. Do not invent information.
-5. Do not use information that is not supported by the sources.
-6. Avoid duplicate findings.
-7. Prefer important and useful findings.
+2. Every finding must contain evidence that directly supports
+   THAT PARTICULAR CLAIM.
 
-WEB SEARCH RESULTS:
+3. DO NOT reuse the same evidence paragraph for multiple findings.
 
-{research_context}
+4. Evidence must be taken from the provided source content.
+
+5. Every finding must use the URL of the source that actually
+   supports the finding.
+
+6. Do not invent facts that are not present in the sources.
+
+7. Do not use generic evidence such as:
+   "RAG has evolved significantly..."
+   unless that exact statement specifically supports the claim.
+
+8. Make each finding meaningfully different.
+
+9. Prefer concrete technical developments, capabilities,
+   techniques, applications, limitations, or trends.
+
+10. If a source does not contain enough information to support
+    a claim, choose another source.
+
+Return exactly 5 findings.
+
+WEB SOURCES:
+
+{source_text}
 """
 
-    analysis = structured_llm.invoke(prompt)
+    try:
+        analysis = structured_llm.invoke(prompt)
 
-    state.research_findings = analysis.findings
+    except Exception as exc:
+        state.status = "failed"
 
-    state.sources = [
-        Source(
-            title=result["title"],
-            url=result["url"],
-            snippet=result["content"][:300],
+        state.execution_history.append(
+            AgentEvent(
+                agent="Research Agent",
+                status="failed",
+                message=f"LLM research analysis failed: {exc}",
+            )
         )
-        for result in results
-    ]
+
+        return state
+
+    # ---------------------------------------------------------
+    # 5. Validate the returned findings
+    # ---------------------------------------------------------
+
+    findings = []
+
+    for finding in analysis.findings:
+
+        if not finding.claim.strip():
+            continue
+
+        if not finding.evidence.strip():
+            continue
+
+        if not finding.source_url.strip():
+            continue
+
+        findings.append(
+            ResearchFinding(
+                claim=finding.claim.strip(),
+                evidence=finding.evidence.strip(),
+                source_url=finding.source_url.strip(),
+            )
+        )
+
+    # ---------------------------------------------------------
+    # 6. Make sure we actually received findings
+    # ---------------------------------------------------------
+
+    if not findings:
+        state.status = "failed"
+
+        state.execution_history.append(
+            AgentEvent(
+                agent="Research Agent",
+                status="failed",
+                message="The LLM returned no valid research findings.",
+            )
+        )
+
+        return state
+
+    state.research_findings = findings
+
+    # ---------------------------------------------------------
+    # 7. Complete research
+    # ---------------------------------------------------------
 
     state.status = "researched"
+
+    state.execution_history.append(
+        AgentEvent(
+            agent="Research Agent",
+            status="completed",
+            message=(
+                f"Attempt #{attempt_number} completed. "
+                f"Sources: {len(state.sources)}. "
+                f"Findings: {len(state.research_findings)}."
+            ),
+        )
+    )
 
     return state
 
 
 if __name__ == "__main__":
-    test_state = AgentState(
+    initial_state = AgentState(
         user_query="What are the latest developments in RAG systems?"
     )
 
-    result = research(test_state)
+    result = research(initial_state)
 
-    print("\nSTATUS:")
+    print("\n=== RESEARCH STATUS ===")
     print(result.status)
 
-    print("\nSOURCES:")
+    print(f"Research attempts: {result.research_attempts}")
+    print(f"Sources: {len(result.sources)}")
+    print(f"Findings: {len(result.research_findings)}")
 
-    for source in result.sources:
-        print(f"- {source.title}")
-        print(f"  {source.url}")
+    print("\n=== FINDINGS ===")
 
-    print("\nRESEARCH FINDINGS:")
-
-    for index, finding in enumerate(result.research_findings, start=1):
+    for index, finding in enumerate(
+        result.research_findings,
+        start=1,
+    ):
         print(f"\nFinding {index}")
         print(f"Claim: {finding.claim}")
         print(f"Evidence: {finding.evidence}")
         print(f"Source: {finding.source_url}")
+
+    print("\n=== EXECUTION HISTORY ===")
+
+    for event in result.execution_history:
+        print(
+            f"[{event.agent}] "
+            f"{event.status}: "
+            f"{event.message}"
+        )

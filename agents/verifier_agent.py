@@ -1,7 +1,7 @@
 ﻿from langchain_openai import ChatOpenAI
 
 from config.settings import get_settings
-from models.schemas import AgentState
+from models.schemas import AgentEvent, AgentState
 
 
 def get_llm() -> ChatOpenAI:
@@ -20,9 +20,26 @@ def verify_research(state: AgentState) -> AgentState:
     state.status = "verifying"
     state.step_count += 1
 
+    state.execution_history.append(
+        AgentEvent(
+            agent="Verifier Agent",
+            status="started",
+            message="Checking research findings against their evidence.",
+        )
+    )
+
     if not state.research_findings:
         state.error = "No research findings available for verification."
         state.status = "failed"
+
+        state.execution_history.append(
+            AgentEvent(
+                agent="Verifier Agent",
+                status="failed",
+                message="No research findings available.",
+            )
+        )
+
         return state
 
     findings_text = "\n\n".join(
@@ -43,54 +60,100 @@ def verify_research(state: AgentState) -> AgentState:
     prompt = f"""
 You are a strict research verification agent.
 
-The original research question is:
+Original research question:
 
 {state.user_query}
 
-The Research Agent produced these findings:
+Research findings:
 
 {findings_text}
 
-Your job is to determine whether the research is reliable enough
-to be used in a final report.
+Evaluate every finding.
 
-Check every finding for:
+For each finding, check:
 
-1. Does the evidence actually support the claim?
-2. Is the source URL present?
-3. Is the finding relevant to the original question?
-4. Does the finding contain unsupported or invented information?
-5. Are there obvious contradictions between findings?
+1. Does the evidence support the claim?
+2. Is a source URL provided?
+3. Is the finding relevant to the question?
+4. Does it contain unsupported information?
+5. Are there contradictions?
 
-Give your decision using exactly this format:
+Return ONLY this format:
 
 VERDICT: PASS
+REASON: <short explanation>
+FAILED_FINDINGS: NONE
 
-or
+OR:
 
 VERDICT: FAIL
-
-Then provide:
-
 REASON: <short explanation>
+FAILED_FINDINGS: 1, 3
 
-FAILED_FINDINGS: <comma-separated finding numbers, or NONE>
-
-Be strict. If important claims are unsupported, choose FAIL.
+Use FAIL when important findings are unsupported.
 """
 
-    response = llm.invoke(prompt)
+    try:
+        response = llm.invoke(prompt)
 
-    verification_text = response.content.strip()
+        verification_text = response.content.strip()
 
-    state.final_answer = verification_text
+        state.final_answer = verification_text
 
-    if "VERDICT: PASS" in verification_text:
-        state.status = "verified"
-    else:
-        state.status = "verification_failed"
+        if "VERDICT: PASS" in verification_text:
+            state.verification_verdict = "PASS"
+            state.verification_reason = verification_text
+            state.failed_findings = []
+            state.status = "verified"
 
-    return state
+            state.execution_history.append(
+                AgentEvent(
+                    agent="Verifier Agent",
+                    status="passed",
+                    message="Research passed verification.",
+                )
+            )
+
+        else:
+            state.verification_verdict = "FAIL"
+            state.status = "verification_failed"
+
+            failed_numbers = []
+
+            for number in range(1, len(state.research_findings) + 1):
+                if str(number) in verification_text:
+                    failed_numbers.append(number)
+
+            state.failed_findings = failed_numbers
+
+            state.verification_reason = verification_text
+
+            state.execution_history.append(
+                AgentEvent(
+                    agent="Verifier Agent",
+                    status="failed",
+                    message=(
+                        "Research failed verification. "
+                        f"Failed findings: {failed_numbers}"
+                    ),
+                )
+            )
+
+        return state
+
+    except Exception as exc:
+        state.error = str(exc)
+        state.status = "failed"
+
+        state.execution_history.append(
+            AgentEvent(
+                agent="Verifier Agent",
+                status="error",
+                message=str(exc),
+            )
+        )
+
+        return state
 
 
 if __name__ == "__main__":
@@ -107,6 +170,11 @@ if __name__ == "__main__":
         print("\nERROR:")
         print(result.error)
 
-    if result.final_answer:
-        print("\nVERIFICATION RESULT:")
-        print(result.final_answer)
+    print("\n=== EXECUTION HISTORY ===")
+
+    for event in result.execution_history:
+        print(
+            f"[{event.agent}] "
+            f"{event.status}: "
+            f"{event.message}"
+        )
