@@ -1,6 +1,7 @@
-from langchain_openai import ChatOpenAI
+﻿from langchain_openai import ChatOpenAI
+
 from config.settings import get_settings
-from models.schemas import AgentState, ResearchFinding, Source
+from models.schemas import AgentState, ResearchAnalysis, ResearchFinding, Source
 from tools.search_tool import search_web
 
 
@@ -41,6 +42,8 @@ def research(state: AgentState) -> AgentState:
 
     llm = get_llm()
 
+    structured_llm = llm.with_structured_output(ResearchAnalysis)
+
     prompt = f"""
 You are a research analyst.
 
@@ -50,33 +53,28 @@ The user wants information about:
 
 Below are web search results.
 
-Analyze them carefully.
+Analyze the sources carefully.
 
-Your tasks are:
+Create individual research findings.
 
-1. Identify the most useful factual information.
-2. Remove irrelevant information.
-3. Do not invent facts that are not supported by the sources.
-4. Use only information contained in the search results.
-5. Clearly distinguish facts from opinions or predictions.
-6. Give a concise and useful research analysis.
+For every finding:
+
+1. Write one clear factual claim.
+2. Provide evidence from the search results.
+3. Provide the URL of the source supporting that claim.
+4. Do not invent information.
+5. Do not use information that is not supported by the sources.
+6. Avoid duplicate findings.
+7. Prefer important and useful findings.
 
 WEB SEARCH RESULTS:
 
 {research_context}
-
-Return a concise research analysis.
 """
 
-    response = llm.invoke(prompt)
+    analysis = structured_llm.invoke(prompt)
 
-    state.research_findings = [
-        ResearchFinding(
-            claim="Research analysis",
-            evidence=response.content,
-            source_url=results[0]["url"],
-        )
-    ]
+    state.research_findings = analysis.findings
 
     state.sources = [
         Source(
@@ -86,6 +84,8 @@ Return a concise research analysis.
         )
         for result in results
     ]
+
+    state.status = "researched"
 
     return state
 
@@ -106,7 +106,10 @@ if __name__ == "__main__":
         print(f"- {source.title}")
         print(f"  {source.url}")
 
-    print("\nRESEARCH ANALYSIS:")
+    print("\nRESEARCH FINDINGS:")
 
-    for finding in result.research_findings:
-        print(finding.evidence)
+    for index, finding in enumerate(result.research_findings, start=1):
+        print(f"\nFinding {index}")
+        print(f"Claim: {finding.claim}")
+        print(f"Evidence: {finding.evidence}")
+        print(f"Source: {finding.source_url}")
