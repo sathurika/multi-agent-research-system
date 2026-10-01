@@ -138,7 +138,7 @@ Rules:
         verification_text = response.content.strip()
 
         # Store the verifier response separately.
-        state.verification_reason = verification_text
+        # state.verification_reason = verification_text
 
         # -----------------------------------------------------
         # 5. Parse VERDICT

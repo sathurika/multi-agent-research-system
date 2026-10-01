@@ -1,7 +1,8 @@
 ﻿from langchain_openai import ChatOpenAI
 
 from config.settings import get_settings
-from models.schemas import AgentState
+# from models.schemas import AgentState
+from models.schemas import AgentEvent, AgentState
 
 
 def get_llm() -> ChatOpenAI:
@@ -19,6 +20,13 @@ def get_llm() -> ChatOpenAI:
 def write_report(state: AgentState) -> AgentState:
     state.status = "writing"
     state.step_count += 1
+    state.execution_history.append(
+    AgentEvent(
+        agent="Writer Agent",
+        status="started",
+        message="Generating the final research report.",
+    )
+)
 
     if not state.research_findings:
         state.error = "No research findings available for the Writer Agent."
@@ -71,6 +79,13 @@ Requirements:
 
     state.final_answer = response.content
     state.status = "completed"
+    state.execution_history.append(
+    AgentEvent(
+        agent="Writer Agent",
+        status="completed",
+        message="Final research report generated.",
+    )
+)
 
     return state
 
