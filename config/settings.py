@@ -10,12 +10,14 @@ class Settings(BaseSettings):
 
     model_provider: str = "openrouter"
     model_name: str = "openai/gpt-4o-mini"
+    
 
     max_agent_steps: int = 8
     max_retries: int = 2
     request_timeout: int = 30
 
     openrouter_api_key: str = ""
+    tavily_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
